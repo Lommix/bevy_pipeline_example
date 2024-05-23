@@ -1,0 +1,8 @@
+[package]
+name = "bevy_render_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.13.2"
+bytemuck = "1.16.0"
