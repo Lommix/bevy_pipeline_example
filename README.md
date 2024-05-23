@@ -1,4 +1,4 @@
-# Bevy Custom Render Pipline Example
+# Bevy Custom Render Pipeline Example
 
 Example for my talk 'Hooking into the Bevy Rendering Pipeline'
 
