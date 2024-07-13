@@ -101,14 +101,10 @@ impl FromWorld for FixedQuadMesh {
         ]);
         vertex_buffer.write_buffer(render_device, render_queue);
 
-        Extend::extend(
-            &mut index_buffer,
-            [
-                0, 1, 2, // first triangle
-                0, 2, 3, // second triangle
-            ],
-        );
-
+        index_buffer.extend([
+            0, 1, 2, // first triangle
+            0, 2, 3, // second triangle
+        ]);
         index_buffer.write_buffer(render_device, render_queue);
 
         Self {
