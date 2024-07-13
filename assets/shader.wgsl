@@ -1,4 +1,4 @@
-#import bevy_render::{ maths::affine_to_square, view::View, globals::Globals }
+#import bevy_render::{ maths::affine3_to_square, view::View, globals::Globals }
 
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> globals: Globals;
@@ -41,7 +41,7 @@ fn vertex(in: VertexInput) -> VertexOutput{
 	// 0,0   1,0
 
 	// compute the instance matrix
-	let instance_transform = affine_to_square(mat3x4<f32>(
+	let instance_transform = affine3_to_square(mat3x4<f32>(
         in.i_translation,
         in.i_rotation,
         in.i_scale,
@@ -58,7 +58,7 @@ fn vertex(in: VertexInput) -> VertexOutput{
 
 	// multiple the vertex by the projection matrix and the instance transform
     out.clip_position =
-		view.view_proj
+		view.clip_from_world
 		* instance_transform
 		* vec4<f32>(offset_position * vec3(size * animation_scale,1.), 1.0);
 

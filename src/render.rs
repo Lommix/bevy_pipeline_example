@@ -7,30 +7,30 @@ use bevy::{
             SystemParamItem,
         },
     },
+    math::FloatOrd,
     prelude::*,
     render::{
         globals::GlobalsUniform,
         mesh::PrimitiveTopology,
         render_asset::RenderAssets,
         render_phase::{
-            AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult,
-            RenderPhase, SetItemPipeline, TrackedRenderPass,
+            AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
+            RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
         },
         render_resource::{
             binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupLayout,
             BindGroupLayoutEntries, BlendState, Buffer, BufferInitDescriptor, BufferUsages,
-            BufferVec, ColorTargetState, ColorWrites, FragmentState, FrontFace, IndexFormat,
-            MultisampleState, PipelineCache, PolygonMode, PrimitiveState, RenderPipelineDescriptor,
+            ColorTargetState, ColorWrites, FragmentState, FrontFace, IndexFormat, MultisampleState,
+            PipelineCache, PolygonMode, PrimitiveState, RawBufferVec, RenderPipelineDescriptor,
             ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat,
             VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
         },
         renderer::{RenderDevice, RenderQueue},
-        texture::FallbackImage,
+        texture::{FallbackImage, GpuImage},
         view::{ViewUniform, VisibleEntities},
         Extract, Render, RenderApp, RenderSet,
     },
     sprite::SetMesh2dViewBindGroup,
-    utils::FloatOrd,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -38,7 +38,7 @@ use bytemuck::{Pod, Zeroable};
 pub struct MyRenderPlugin;
 impl Plugin for MyRenderPlugin {
     fn build(&self, app: &mut App) {
-        let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
@@ -55,7 +55,7 @@ impl Plugin for MyRenderPlugin {
             );
     }
     fn finish(&self, app: &mut App) {
-        let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
@@ -81,8 +81,8 @@ struct ExtractedSpriteInstance {
 
 #[derive(Resource)]
 pub struct FixedQuadMesh {
-    vertex_buffer: BufferVec<Vec3>,
-    index_buffer: BufferVec<u32>,
+    vertex_buffer: RawBufferVec<Vec3>,
+    index_buffer: RawBufferVec<u32>,
 }
 
 impl FromWorld for FixedQuadMesh {
@@ -90,8 +90,8 @@ impl FromWorld for FixedQuadMesh {
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
 
-        let mut vertex_buffer = BufferVec::<Vec3>::new(BufferUsages::VERTEX);
-        let mut index_buffer = BufferVec::<u32>::new(BufferUsages::INDEX);
+        let mut vertex_buffer = RawBufferVec::<Vec3>::new(BufferUsages::VERTEX);
+        let mut index_buffer = RawBufferVec::<u32>::new(BufferUsages::INDEX);
 
         vertex_buffer.extend([
             Vec3::new(0., 0., 0.),
@@ -105,7 +105,6 @@ impl FromWorld for FixedQuadMesh {
             0, 1, 2, // first triangle
             0, 2, 3, // second triangle
         ]);
-
         index_buffer.write_buffer(render_device, render_queue);
 
         Self {
@@ -171,20 +170,29 @@ fn queue(
     my_pipeline: Res<CustomPipeline>, // failed
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<CustomPipeline>>,
-    mut views: Query<(&VisibleEntities, &mut RenderPhase<Transparent2d>)>,
+    mut render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
+    visible_entities: Query<(Entity, &VisibleEntities)>,
     extracted_sprites: Query<(Entity, &ExtractedSpriteInstance)>,
 ) {
     let my_draw_function = transparent_2d_draw_functions.read().id::<MyDrawCommand>();
 
     // iterate over each camera
-    for (visible_entities, mut render_phase) in views.iter_mut() {
+    for (view_entity, view_visible_entities) in visible_entities.iter() {
+        let Some(render_phase) = render_phases.get_mut(&view_entity) else {
+            info!("no render phase found for camera");
+            continue;
+        };
+
         // load the pipline from the loaded pipeline cache
         let key = CustomPipelineKey;
         let pipeline = pipelines.specialize(&pipeline_cache, &my_pipeline, key);
 
         for (entity, sprite) in extracted_sprites.iter() {
             //check if the current camera can see our entity
-            if !visible_entities.entities.contains(&entity) {
+            if !view_visible_entities
+                .get::<With<CustomSprite>>()
+                .contains(&entity)
+            {
                 continue;
             }
 
@@ -195,7 +203,7 @@ fn queue(
                 pipeline,
                 draw_function: my_draw_function,
                 batch_range: 0..1,
-                dynamic_offset: None,
+                extra_index: PhaseItemExtraIndex::NONE,
             })
         }
     }
@@ -214,7 +222,7 @@ pub struct PreparedSprites {
 fn prepare(
     mut cmd: Commands,
     render_device: Res<RenderDevice>,
-    images: Res<RenderAssets<Image>>,
+    images: Res<RenderAssets<GpuImage>>,
     fallback_image: Res<FallbackImage>,
     pipeline: Res<CustomPipeline>,
     extracted_sprites: Query<(Entity, &ExtractedSpriteInstance, &CustomSprite)>,
@@ -226,14 +234,14 @@ fn prepare(
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         });
 
-        let uniform_buffer = custom_sprite
-            .as_bind_group(
-                &pipeline.uniform_layout,
-                &render_device,
-                &images,
-                &fallback_image,
-            )
-            .unwrap();
+        let Ok(uniform_buffer) = custom_sprite.as_bind_group(
+            &pipeline.uniform_layout,
+            &render_device,
+            &images,
+            &fallback_image,
+        ) else {
+            continue;
+        };
 
         cmd.entity(entity).insert(PreparedSprites {
             uniform_buffer: uniform_buffer.bind_group,
