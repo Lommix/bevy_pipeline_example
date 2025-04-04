@@ -1,8 +1,5 @@
 use bevy::{
-    core_pipeline::{
-        core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT},
-        tonemapping::get_lut_bind_group_layout_entries,
-    },
+    core_pipeline::core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT},
     ecs::{
         query::ROQueryItem,
         system::{
@@ -13,7 +10,6 @@ use bevy::{
     math::FloatOrd,
     prelude::*,
     render::{
-        globals::GlobalsUniform,
         mesh::PrimitiveTopology,
         render_asset::RenderAssets,
         render_phase::{
@@ -21,11 +17,11 @@ use bevy::{
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupLayout,
-            BindGroupLayoutEntries, BlendState, Buffer, BufferInitDescriptor, BufferUsages,
+            AsBindGroup, BindGroup, BindGroupLayout,
+            BlendState, Buffer, BufferInitDescriptor, BufferUsages,
             ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState,
             FragmentState, FrontFace, IndexFormat, MultisampleState, PipelineCache, PolygonMode,
-            PrimitiveState, RawBufferVec, RenderPipelineDescriptor, ShaderStages,
+            PrimitiveState, RawBufferVec, RenderPipelineDescriptor,
             SpecializedRenderPipeline, SpecializedRenderPipelines, StencilFaceState, StencilState,
             TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
             VertexStepMode,
@@ -34,7 +30,7 @@ use bevy::{
         storage::GpuShaderStorageBuffer,
         sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
         texture::{FallbackImage, GpuImage},
-        view::{RenderVisibleEntities, ViewUniform, VisibleEntities},
+        view::RenderVisibleEntities,
         Extract, Render, RenderApp, RenderSet,
     },
     sprite::{Mesh2dPipeline, SetMesh2dViewBindGroup},
@@ -283,7 +279,6 @@ fn prepare(
 // Pipeline
 #[derive(Resource)]
 pub struct CustomPipeline {
-    mesh_pipeline: Mesh2dPipeline,
     view_layout: BindGroupLayout,
     uniform_layout: BindGroupLayout,
     shader: Handle<Shader>,
@@ -297,28 +292,28 @@ impl FromWorld for CustomPipeline {
         let server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
 
-        let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
-        let view_layout = render_device.create_bind_group_layout(
-            "mesh_2d_view_layout",
-            &BindGroupLayoutEntries::sequential(
-                ShaderStages::VERTEX_FRAGMENT,
-                (
-                    uniform_buffer::<ViewUniform>(true),
-                    uniform_buffer::<GlobalsUniform>(false),
-                    tonemapping_lut_entries[0].visibility(ShaderStages::FRAGMENT),
-                    tonemapping_lut_entries[1].visibility(ShaderStages::FRAGMENT),
-                ),
-            ),
-        );
+        // let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
+        // let view_layout = render_device.create_bind_group_layout(
+        //     "mesh_2d_view_layout",
+        //     &BindGroupLayoutEntries::sequential(
+        //         ShaderStages::VERTEX_FRAGMENT,
+        //         (
+        //             uniform_buffer::<ViewUniform>(true),
+        //             uniform_buffer::<GlobalsUniform>(false),
+        //             tonemapping_lut_entries[0].visibility(ShaderStages::FRAGMENT),
+        //             tonemapping_lut_entries[1].visibility(ShaderStages::FRAGMENT),
+        //         ),
+        //     ),
+        // );
+        
+        // copy view layout from the mesh 2d pipeline.
+        // this adds the view and globals uniform buffer bindings
+        let mesh_pipeline = world.resource::<Mesh2dPipeline>();
 
+        let view_layout = mesh_pipeline.view_layout.clone();
         let uniform_layout = CustomSprite::bind_group_layout(render_device);
 
-        // grab a copy of the mesh pipeline, because we are going to copy all the config
-        // apart from bits we actually care about:
-        let mesh_pipeline = world.resource::<Mesh2dPipeline>().clone();
-
         Self {
-            mesh_pipeline,
             view_layout,
             uniform_layout,
             shader: server.load("shader.wgsl"),
@@ -330,8 +325,13 @@ impl SpecializedRenderPipeline for CustomPipeline {
     type Key = CustomPipelineKey;
 
     #[rustfmt::skip]
-    fn specialize(&self, _key: Self::Key) -> RenderPipelineDescriptor {
-        // TODO get the mesh 2d pipeline config to copy settings from?
+    fn specialize(&self, _key: Self::Key) -> RenderPipelineDescriptor { 
+        let shader_defs = vec![
+            // #[cfg(feature = "webgl")]
+            "SIXTEEN_BYTE_ALIGNMENT".into(),
+        ];
+        // TODO feels wrong to have to copy and paste in a bunch of defaults here,
+        //      can i clone them from the Transparent2d pipeline somehow?
         RenderPipelineDescriptor {
             label: Some("my pipeline".into()),
             layout: vec![
@@ -383,7 +383,7 @@ impl SpecializedRenderPipeline for CustomPipeline {
             },
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
-                shader_defs: vec![],
+                shader_defs,
                 entry_point: "fragment".into(),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba8UnormSrgb,
@@ -401,7 +401,7 @@ impl SpecializedRenderPipeline for CustomPipeline {
                 strip_index_format: None,
             },
             push_constant_ranges: vec![],
-            // TODO: we need to be copying this stuff from the mesh 2d pipeline, not copy paste..
+            // TODO: copied from the 2d pipeline, but can't we clone it from somewhere without copy paste, so it doesn't rot?
             depth_stencil: Some(DepthStencilState {
                 format: CORE_2D_DEPTH_FORMAT,
                 depth_write_enabled: false,
@@ -457,7 +457,9 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetBindGroup<I> {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(prepared_sprite) = prepared_data else {
-            return RenderCommandResult::Failure("missing prepared sprite");
+            // this happens once. i suppose it doesn't matter, so skip not failure.
+            // return RenderCommandResult::Failure("missing prepared sprite");
+            return RenderCommandResult::Skip;
         };
 
         // bind our texture
