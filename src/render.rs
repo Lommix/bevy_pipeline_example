@@ -17,11 +17,10 @@ use bevy::{
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
         },
         render_resource::{
-            AsBindGroup, BindGroup, BindGroupLayout,
-            BlendState, Buffer, BufferInitDescriptor, BufferUsages,
-            ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState,
-            FragmentState, FrontFace, IndexFormat, MultisampleState, PipelineCache, PolygonMode,
-            PrimitiveState, RawBufferVec, RenderPipelineDescriptor,
+            AsBindGroup, BindGroup, BindGroupLayout, BlendState, Buffer, BufferInitDescriptor,
+            BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
+            DepthStencilState, FragmentState, FrontFace, IndexFormat, MultisampleState,
+            PipelineCache, PolygonMode, PrimitiveState, RawBufferVec, RenderPipelineDescriptor,
             SpecializedRenderPipeline, SpecializedRenderPipelines, StencilFaceState, StencilState,
             TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
             VertexStepMode,
@@ -148,7 +147,6 @@ impl From<&GlobalTransform> for SpriteTransformMatrix {
 }
 
 /// copy data from the game world into the render world
-/// RUNS IN RENDER WORLD
 fn extract(
     mut commands: Commands,
     sprites: Extract<
@@ -160,14 +158,8 @@ fn extract(
         )>,
     >,
 ) {
-    if sprites.is_empty() {
-        warn!("No sprites found in extract");
-        return;
-    }
-
     for (render_entity, transform, visibilty, sprite) in sprites.iter() {
         if !visibilty.get() {
-            warn!("Sprite is not visible x");
             continue;
         }
 
@@ -184,10 +176,9 @@ fn extract(
 // QUEUE: get all the camera/views, and add the appropriate items to that view's render phase.
 //        ie, just stuff visible to that view.
 //        (remember each view/camera has a render phase comp that holds phase items)
-// ON RENDER WORLD
 fn queue(
     transparent_2d_draw_functions: Res<DrawFunctions<Transparent2d>>,
-    my_pipeline: Res<CustomPipeline>, // failed
+    my_pipeline: Res<CustomPipeline>,
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<CustomPipeline>>,
     mut render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
@@ -199,7 +190,7 @@ fn queue(
     // iterate over each camera
     for (view_entity, view_visible_entities) in visible_entities.iter() {
         let Some(render_phase) = render_phases.get_mut(&view_entity) else {
-            info!("no render phase found for camera");
+            // info!("no render phase found for camera");
             continue;
         };
         // load the pipline from the loaded pipeline cache
@@ -207,7 +198,7 @@ fn queue(
         let pipeline = pipelines.specialize(&pipeline_cache, &my_pipeline, key);
 
         if extracted_sprites.is_empty() {
-            warn!("No extracted sprites found");
+            // warn!("No extracted sprites found");
             continue;
         }
 
@@ -217,7 +208,7 @@ fn queue(
                 .get::<With<CustomSprite>>()
                 .contains(&(render_entity, *main_entity))
             {
-                warn!("Camera cannot see entity");
+                // warn!("Camera cannot see entity");
                 continue;
             }
 
@@ -292,20 +283,6 @@ impl FromWorld for CustomPipeline {
         let server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
 
-        // let tonemapping_lut_entries = get_lut_bind_group_layout_entries();
-        // let view_layout = render_device.create_bind_group_layout(
-        //     "mesh_2d_view_layout",
-        //     &BindGroupLayoutEntries::sequential(
-        //         ShaderStages::VERTEX_FRAGMENT,
-        //         (
-        //             uniform_buffer::<ViewUniform>(true),
-        //             uniform_buffer::<GlobalsUniform>(false),
-        //             tonemapping_lut_entries[0].visibility(ShaderStages::FRAGMENT),
-        //             tonemapping_lut_entries[1].visibility(ShaderStages::FRAGMENT),
-        //         ),
-        //     ),
-        // );
-        
         // copy view layout from the mesh 2d pipeline.
         // this adds the view and globals uniform buffer bindings
         let mesh_pipeline = world.resource::<Mesh2dPipeline>();
@@ -325,13 +302,14 @@ impl SpecializedRenderPipeline for CustomPipeline {
     type Key = CustomPipelineKey;
 
     #[rustfmt::skip]
-    fn specialize(&self, _key: Self::Key) -> RenderPipelineDescriptor { 
+    fn specialize(&self, _key: Self::Key) -> RenderPipelineDescriptor {
+        // TODO: we can add appropriate padding in the shader for webgl2 if desired:
         let shader_defs = vec![
             // #[cfg(feature = "webgl")]
-            "SIXTEEN_BYTE_ALIGNMENT".into(),
+            // "SIXTEEN_BYTE_ALIGNMENT".into(),
         ];
         // TODO feels wrong to have to copy and paste in a bunch of defaults here,
-        //      can i clone them from the Transparent2d pipeline somehow?
+        //      can i clone them from the mes2d pipeline or something?
         RenderPipelineDescriptor {
             label: Some("my pipeline".into()),
             layout: vec![
