@@ -19,12 +19,13 @@ fn main() -> AppExit {
 }
 
 fn setup(mut cmd: Commands, server: Res<AssetServer>) {
-    cmd.spawn(Camera2dBundle::default());
+    cmd.spawn(Camera2d);
 
     let position = Vec3::new(0., 0., 0.);
 
     cmd.spawn((
-        SpatialBundle::from_transform(Transform::from_translation(position)),
+        Transform::from_translation(position),
+        Visibility::default(),
         render::CustomSprite {
             texture: server.load("icon.png"),
         },
