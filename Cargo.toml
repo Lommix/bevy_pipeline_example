@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.13.2"
-bytemuck = "1.16.0"
+bevy = "0.14"
+bytemuck = "1.7"
