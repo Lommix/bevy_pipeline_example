@@ -1,5 +1,5 @@
 use bevy::{
-    core_pipeline::core_2d::Transparent2d,
+    core_pipeline::core_2d::{Transparent2d, CORE_2D_DEPTH_FORMAT},
     ecs::{
         query::ROQueryItem,
         system::{
@@ -7,30 +7,32 @@ use bevy::{
             SystemParamItem,
         },
     },
+    math::FloatOrd,
     prelude::*,
     render::{
-        globals::GlobalsUniform,
         mesh::PrimitiveTopology,
         render_asset::RenderAssets,
         render_phase::{
-            AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult,
-            RenderPhase, SetItemPipeline, TrackedRenderPass,
+            AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
+            RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupLayout,
-            BindGroupLayoutEntries, BlendState, Buffer, BufferInitDescriptor, BufferUsages,
-            BufferVec, ColorTargetState, ColorWrites, FragmentState, FrontFace, IndexFormat,
-            MultisampleState, PipelineCache, PolygonMode, PrimitiveState, RenderPipelineDescriptor,
-            ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat,
-            VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+            AsBindGroup, BindGroup, BindGroupLayout, BlendState, Buffer, BufferInitDescriptor,
+            BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
+            DepthStencilState, FragmentState, FrontFace, IndexFormat, MultisampleState,
+            PipelineCache, PolygonMode, PrimitiveState, RawBufferVec, RenderPipelineDescriptor,
+            SpecializedRenderPipeline, SpecializedRenderPipelines, StencilFaceState, StencilState,
+            TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState,
+            VertexStepMode,
         },
         renderer::{RenderDevice, RenderQueue},
-        texture::FallbackImage,
-        view::{ViewUniform, VisibleEntities},
+        storage::GpuShaderStorageBuffer,
+        sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
+        texture::{FallbackImage, GpuImage},
+        view::RenderVisibleEntities,
         Extract, Render, RenderApp, RenderSet,
     },
-    sprite::SetMesh2dViewBindGroup,
-    utils::FloatOrd,
+    sprite::{Mesh2dPipeline, SetMesh2dViewBindGroup},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -38,7 +40,7 @@ use bytemuck::{Pod, Zeroable};
 pub struct MyRenderPlugin;
 impl Plugin for MyRenderPlugin {
     fn build(&self, app: &mut App) {
-        let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
@@ -55,7 +57,7 @@ impl Plugin for MyRenderPlugin {
             );
     }
     fn finish(&self, app: &mut App) {
-        let Ok(render_app) = app.get_sub_app_mut(RenderApp) else {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
 
@@ -67,6 +69,7 @@ impl Plugin for MyRenderPlugin {
 // -------------------
 // My Data
 #[derive(AsBindGroup, Component, Clone)]
+#[require(SyncToRenderWorld)]
 pub struct CustomSprite {
     #[texture(0)]
     #[sampler(1)]
@@ -81,8 +84,8 @@ struct ExtractedSpriteInstance {
 
 #[derive(Resource)]
 pub struct FixedQuadMesh {
-    vertex_buffer: BufferVec<Vec3>,
-    index_buffer: BufferVec<u32>,
+    vertex_buffer: RawBufferVec<Vec3>,
+    index_buffer: RawBufferVec<u32>,
 }
 
 impl FromWorld for FixedQuadMesh {
@@ -90,8 +93,8 @@ impl FromWorld for FixedQuadMesh {
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
 
-        let mut vertex_buffer = BufferVec::<Vec3>::new(BufferUsages::VERTEX);
-        let mut index_buffer = BufferVec::<u32>::new(BufferUsages::INDEX);
+        let mut vertex_buffer = RawBufferVec::<Vec3>::new(BufferUsages::VERTEX);
+        let mut index_buffer = RawBufferVec::<u32>::new(BufferUsages::INDEX);
 
         vertex_buffer.extend([
             Vec3::new(0., 0., 0.),
@@ -145,15 +148,22 @@ impl From<&GlobalTransform> for SpriteTransformMatrix {
 
 /// copy data from the game world into the render world
 fn extract(
-    mut cmd: Commands,
-    sprites: Extract<Query<(Entity, &GlobalTransform, &ViewVisibility, &CustomSprite)>>,
+    mut commands: Commands,
+    sprites: Extract<
+        Query<(
+            RenderEntity,
+            &GlobalTransform,
+            &ViewVisibility,
+            &CustomSprite,
+        )>,
+    >,
 ) {
-    for (entity, transform, visibilty, sprite) in sprites.iter() {
+    for (render_entity, transform, visibilty, sprite) in sprites.iter() {
         if !visibilty.get() {
             continue;
         }
 
-        cmd.get_or_spawn(entity).insert((
+        commands.entity(render_entity).insert((
             ExtractedSpriteInstance {
                 instance_data: SpriteTransformMatrix::from(transform),
                 z_order: transform.translation().z,
@@ -163,39 +173,53 @@ fn extract(
     }
 }
 
-// -------------------
-// queue
-// decide which camera view sees the entitie and add it to its render phase
+// QUEUE: get all the camera/views, and add the appropriate items to that view's render phase.
+//        ie, just stuff visible to that view.
+//        (remember each view/camera has a render phase comp that holds phase items)
 fn queue(
     transparent_2d_draw_functions: Res<DrawFunctions<Transparent2d>>,
-    my_pipeline: Res<CustomPipeline>, // failed
+    my_pipeline: Res<CustomPipeline>,
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<CustomPipeline>>,
-    mut views: Query<(&VisibleEntities, &mut RenderPhase<Transparent2d>)>,
-    extracted_sprites: Query<(Entity, &ExtractedSpriteInstance)>,
+    mut render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
+    visible_entities: Query<(Entity, &RenderVisibleEntities)>,
+    extracted_sprites: Query<(Entity, &MainEntity, &ExtractedSpriteInstance)>,
 ) {
     let my_draw_function = transparent_2d_draw_functions.read().id::<MyDrawCommand>();
 
     // iterate over each camera
-    for (visible_entities, mut render_phase) in views.iter_mut() {
+    for (view_entity, view_visible_entities) in visible_entities.iter() {
+        let Some(render_phase) = render_phases.get_mut(&view_entity) else {
+            // info!("no render phase found for camera");
+            continue;
+        };
         // load the pipline from the loaded pipeline cache
         let key = CustomPipelineKey;
         let pipeline = pipelines.specialize(&pipeline_cache, &my_pipeline, key);
 
-        for (entity, sprite) in extracted_sprites.iter() {
+        if extracted_sprites.is_empty() {
+            // warn!("No extracted sprites found");
+            continue;
+        }
+
+        for (render_entity, main_entity, sprite) in extracted_sprites.iter() {
             //check if the current camera can see our entity
-            if !visible_entities.entities.contains(&entity) {
+            if !view_visible_entities
+                .get::<With<CustomSprite>>()
+                .contains(&(render_entity, *main_entity))
+            {
+                // warn!("Camera cannot see entity");
                 continue;
             }
 
             // add a `PhaseItem` for our entity to the cameras render phase
             render_phase.add(Transparent2d {
                 sort_key: FloatOrd(sprite.z_order),
-                entity,
+                entity: (render_entity, *main_entity),
                 pipeline,
                 draw_function: my_draw_function,
                 batch_range: 0..1,
-                dynamic_offset: None,
+                extra_index: PhaseItemExtraIndex::NONE,
             })
         }
     }
@@ -214,11 +238,13 @@ pub struct PreparedSprites {
 fn prepare(
     mut cmd: Commands,
     render_device: Res<RenderDevice>,
-    images: Res<RenderAssets<Image>>,
+    images: Res<RenderAssets<GpuImage>>,
+    shader_storage_buffer: Res<RenderAssets<GpuShaderStorageBuffer>>,
     fallback_image: Res<FallbackImage>,
     pipeline: Res<CustomPipeline>,
     extracted_sprites: Query<(Entity, &ExtractedSpriteInstance, &CustomSprite)>,
 ) {
+    let mut param = (images, fallback_image, shader_storage_buffer);
     for (entity, sprite_instance, custom_sprite) in extracted_sprites.iter() {
         let instance_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("transform buffer"),
@@ -226,14 +252,11 @@ fn prepare(
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         });
 
-        let uniform_buffer = custom_sprite
-            .as_bind_group(
-                &pipeline.uniform_layout,
-                &render_device,
-                &images,
-                &fallback_image,
-            )
-            .unwrap();
+        let Ok(uniform_buffer) =
+            custom_sprite.as_bind_group(&pipeline.uniform_layout, &render_device, &mut param)
+        else {
+            continue;
+        };
 
         cmd.entity(entity).insert(PreparedSprites {
             uniform_buffer: uniform_buffer.bind_group,
@@ -260,18 +283,11 @@ impl FromWorld for CustomPipeline {
         let server = world.resource::<AssetServer>();
         let render_device = world.resource::<RenderDevice>();
 
-        let view_layout = render_device.create_bind_group_layout(
-            "mesh2d_view_layout",
-            &BindGroupLayoutEntries::sequential(
-                ShaderStages::VERTEX_FRAGMENT,
-                (
-                    // View
-                    uniform_buffer::<ViewUniform>(true),
-                    uniform_buffer::<GlobalsUniform>(false),
-                ),
-            ),
-        );
+        // copy view layout from the mesh 2d pipeline.
+        // this adds the view and globals uniform buffer bindings
+        let mesh_pipeline = world.resource::<Mesh2dPipeline>();
 
+        let view_layout = mesh_pipeline.view_layout.clone();
         let uniform_layout = CustomSprite::bind_group_layout(render_device);
 
         Self {
@@ -287,7 +303,13 @@ impl SpecializedRenderPipeline for CustomPipeline {
 
     #[rustfmt::skip]
     fn specialize(&self, _key: Self::Key) -> RenderPipelineDescriptor {
-
+        // TODO: we can add appropriate padding in the shader for webgl2 if desired:
+        let shader_defs = vec![
+            // #[cfg(feature = "webgl")]
+            // "SIXTEEN_BYTE_ALIGNMENT".into(),
+        ];
+        // TODO feels wrong to have to copy and paste in a bunch of defaults here,
+        //      can i clone them from the mes2d pipeline or something?
         RenderPipelineDescriptor {
             label: Some("my pipeline".into()),
             layout: vec![
@@ -339,7 +361,7 @@ impl SpecializedRenderPipeline for CustomPipeline {
             },
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
-                shader_defs: vec![],
+                shader_defs,
                 entry_point: "fragment".into(),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba8UnormSrgb,
@@ -357,12 +379,29 @@ impl SpecializedRenderPipeline for CustomPipeline {
                 strip_index_format: None,
             },
             push_constant_ranges: vec![],
-            depth_stencil: None,
+            // TODO: copied from the 2d pipeline, but can't we clone it from somewhere without copy paste, so it doesn't rot?
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_2D_DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::Always,
+                stencil: StencilState {
+                    front: StencilFaceState::IGNORE,
+                    back: StencilFaceState::IGNORE,
+                    read_mask: 0,
+                    write_mask: 0,
+                },
+                bias: DepthBiasState {
+                    constant: 0,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            }),
             multisample: MultisampleState{
                 count: 4,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            zero_initialize_workgroup_memory: true,
         }
     }
 }
@@ -396,7 +435,9 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetBindGroup<I> {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(prepared_sprite) = prepared_data else {
-            return RenderCommandResult::Failure;
+            // this happens once. i suppose it doesn't matter, so skip not failure.
+            // return RenderCommandResult::Failure("missing prepared sprite");
+            return RenderCommandResult::Skip;
         };
 
         // bind our texture
@@ -423,17 +464,17 @@ impl<P: PhaseItem> RenderCommand<P> for DrawSprite {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(prepared_sprite) = prepared_data else {
-            return RenderCommandResult::Failure;
+            return RenderCommandResult::Failure("missing prepared sprite");
         };
 
         let quad_data = param.into_inner();
 
         let Some(index_buffer) = quad_data.index_buffer.buffer() else {
-            return RenderCommandResult::Failure;
+            return RenderCommandResult::Failure("missing index buffer");
         };
 
         let Some(vertex_buffer) = quad_data.vertex_buffer.buffer() else {
-            return RenderCommandResult::Failure;
+            return RenderCommandResult::Failure("missing vertex buffer");
         };
 
         // pass the vertex buffer
